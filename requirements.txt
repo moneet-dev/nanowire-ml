@@ -1,0 +1,19 @@
+# Core scientific stack
+numpy>=1.26
+pandas>=2.0
+scipy>=1.11
+scikit-learn>=1.3
+xgboost>=2.0
+shap>=0.44
+
+# Feature extraction
+iFeatureOmegaCLI
+biopython>=1.81
+
+# Plotting
+matplotlib>=3.7
+seaborn>=0.12
+
+# ESM-2 pipeline (Phase 5 only — requires GPU; install separately if needed)
+# torch
+# fair-esm
