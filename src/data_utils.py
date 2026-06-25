@@ -7,7 +7,9 @@ convention (positives -> 1, negatives -> 0).
 """
 from __future__ import annotations
 
+import io
 import os
+import re
 from collections import Counter
 
 import pandas as pd
@@ -17,16 +19,46 @@ from Bio import SeqIO
 CANONICAL_AA = "ACDEFGHIKLMNPQRSTVWY"
 #: Aromatic residues — relevant to the e-pili "9% aromatic" rule.
 AROMATIC_AA = "FYW"
+#: Characters that never appear inside a protein-sequence line but do appear in
+#: FASTA headers (whitespace, digits, '.', brackets). Used to detect a header
+#: that lost its leading '>' (a source data-entry error that otherwise makes the
+#: parser silently merge that record into the previous one).
+_HEADER_SIGNAL = re.compile(r"[\s\[\]0-9.]")
 
 
-def load_fasta(path: str) -> list[tuple[str, str, str]]:
-    """Return a list of ``(record_id, description, sequence)`` for a FASTA file.
+def repair_fasta_text(text: str) -> tuple[str, int]:
+    """Re-insert a missing leading ``>`` on orphan header lines.
 
-    Sequences are upper-cased. Gaps/whitespace are stripped by BioPython.
+    A protein-sequence line contains only amino-acid letters, so any non-``>``
+    line carrying whitespace, digits, ``.`` or brackets is a header that lost its
+    ``>`` and is repaired in place. Returns ``(repaired_text, n_repaired)``.
     """
+    out_lines: list[str] = []
+    n = 0
+    for raw in text.splitlines():
+        line = raw.rstrip("\r")
+        if line and not line.startswith(">") and _HEADER_SIGNAL.search(line):
+            out_lines.append(">" + line)
+            n += 1
+        else:
+            out_lines.append(line)
+    return "\n".join(out_lines) + "\n", n
+
+
+def load_fasta(path: str, return_repairs: bool = False):
+    """Return ``(record_id, description, sequence)`` tuples for a FASTA file.
+
+    Orphan header lines are repaired first (see :func:`repair_fasta_text`).
+    Sequences are upper-cased. With ``return_repairs=True`` the return value is
+    ``(records, n_repaired)``.
+    """
+    with open(path, "r") as fh:
+        repaired, n_rep = repair_fasta_text(fh.read())
     out: list[tuple[str, str, str]] = []
-    for rec in SeqIO.parse(path, "fasta"):
+    for rec in SeqIO.parse(io.StringIO(repaired), "fasta"):
         out.append((rec.id, rec.description, str(rec.seq).upper()))
+    if return_repairs:
+        return out, n_rep
     return out
 
 
@@ -50,11 +82,14 @@ def build_dataset(
     ``df.attrs['n_dropped_duplicates']``.
     """
     rows: list[dict] = []
+    n_repaired = 0
 
     pidx = 0
     for f in positive_files:
         src = os.path.splitext(os.path.basename(f))[0]
-        for rid, _desc, seq in load_fasta(f):
+        recs, n_rep = load_fasta(f, return_repairs=True)
+        n_repaired += n_rep
+        for rid, _desc, seq in recs:
             rows.append(
                 dict(seq_id=f"pos_{pidx:04d}", source=src, label=1,
                      length=len(seq), sequence=seq, orig_id=rid)
@@ -64,7 +99,9 @@ def build_dataset(
     nidx = 0
     for f in negative_files:
         src = os.path.splitext(os.path.basename(f))[0]
-        for rid, _desc, seq in load_fasta(f):
+        recs, n_rep = load_fasta(f, return_repairs=True)
+        n_repaired += n_rep
+        for rid, _desc, seq in recs:
             if negative_cap is not None and nidx >= negative_cap:
                 break
             rows.append(
@@ -80,6 +117,7 @@ def build_dataset(
         df = df.drop_duplicates(subset="sequence").reset_index(drop=True)
         n_dropped = before - len(df)
     df.attrs["n_dropped_duplicates"] = n_dropped
+    df.attrs["n_orphan_headers_repaired"] = n_repaired
     return df
 
 
@@ -133,6 +171,7 @@ def sanity_report(df: pd.DataFrame) -> dict:
         "n_total": int(len(df)),
         "n_positive": int((df.label == 1).sum()),
         "n_negative": int((df.label == 0).sum()),
+        "n_orphan_headers_repaired": int(df.attrs.get("n_orphan_headers_repaired", 0)),
         "n_duplicate_sequences_dropped": int(df.attrs.get("n_dropped_duplicates", 0)),
         "n_unique_sequences": int(df.sequence.nunique()),
     }
