@@ -24,6 +24,7 @@ from sklearn.model_selection import train_test_split
 from sklearn.neural_network import MLPClassifier
 from sklearn.pipeline import Pipeline
 from sklearn.preprocessing import StandardScaler
+from sklearn.calibration import CalibratedClassifierCV
 from sklearn.svm import SVC
 from xgboost import XGBClassifier
 
@@ -49,7 +50,7 @@ PAPER = {
 
 def build_models() -> dict:
     return {
-        "SVM":     SVC(probability=True, random_state=42),
+        "SVM":     CalibratedClassifierCV(SVC(random_state=42), ensemble=False),
         "RF":      RandomForestClassifier(n_estimators=100, random_state=42, n_jobs=-1),
         "XGBoost": XGBClassifier(n_estimators=100, random_state=42, eval_metric="logloss",
                                  tree_method="hist", n_jobs=-1),
