@@ -36,6 +36,17 @@ ALIASES: dict[str, str] = {
     "TPC type 2": "TPC2",
 }
 
+#: Minimum expected feature counts per descriptor — used to detect stale
+#: encodings when get_descriptor() silently fails on some iFeatureOmegaCLI
+#: versions (returns no error but leaves the previous descriptor's data).
+_MIN_FEATURES: dict[str, int] = {
+    "AAC": 20, "GAAC": 5, "CKSAAP type 1": 1600, "DPC type 1": 400,
+    "DPC type 2": 400, "TPC type 1": 8000, "TPC type 2": 8000,
+    "CTDC": 39, "CTDT": 39, "CTDD": 195, "CTriad": 343, "KNN": 240,
+    "Geary": 24, "Moran": 24, "NMBroto": 24, "AC": 24, "CC": 168,
+    "SOCNumber": 6, "QSOrder": 40, "PAAC": 23, "ZScale": 23, "AAIndex": 23,
+}
+
 _AA = "ACDEFGHIKLMNPQRSTVWY"
 _PATCHED = False
 
@@ -86,6 +97,44 @@ def _install_speed_patches() -> None:
     _PATCHED = True
 
 
+def _get_available_descriptors(protein) -> set[str]:
+    """Return the set of descriptor names this iFeatureOmegaCLI version supports."""
+    # Access the private __cmd_dict through name-mangling
+    for attr in ("_iProtein__cmd_dict", "__cmd_dict"):
+        d = getattr(protein, attr, None)
+        if d is not None:
+            return set(d.keys())
+    return set()
+
+
+def _resolve_descriptors(
+    protein, requested: list[str], verbose: bool = True,
+) -> list[str]:
+    """Check which requested descriptors are actually available in this
+    iFeatureOmegaCLI version and warn about missing ones. Returns the
+    filtered list of available descriptors."""
+    available = _get_available_descriptors(protein)
+    if not available:
+        if verbose:
+            print("[warn] could not inspect available descriptors — "
+                  "trying all requested names", flush=True)
+        return requested
+    resolved: list[str] = []
+    for desc in requested:
+        if desc in available:
+            resolved.append(desc)
+        else:
+            if verbose:
+                print(f"[skip] {desc:16s} — not in this iFeatureOmegaCLI "
+                      f"version's descriptor list", flush=True)
+    if verbose and len(resolved) < len(requested):
+        missing = set(requested) - set(resolved)
+        print(f"[info] {len(resolved)}/{len(requested)} descriptors available; "
+              f"missing: {sorted(missing)}", flush=True)
+        print(f"[info] available descriptors: {sorted(available)}", flush=True)
+    return resolved
+
+
 def extract_all_features(
     fasta_path: str,
     output_dir: str,
@@ -106,16 +155,28 @@ def extract_all_features(
     os.makedirs(output_dir, exist_ok=True)
     protein = iFeatureOmegaCLI.iProtein(fasta_path)
 
+    descriptors = _resolve_descriptors(protein, list(descriptors), verbose)
+
     frames: list[pd.DataFrame] = []
     ok: list[str] = []
     failed: dict[str, str] = {}
 
     for desc in descriptors:
         try:
+            # Null out encodings so we can detect silent failures —
+            # iFeatureOmega's get_descriptor() prints "The descriptor type
+            # does not exist" but doesn't raise or set encodings to None.
+            protein.encodings = None
             protein.get_descriptor(desc)
             enc = protein.encodings
             if enc is None:
-                raise RuntimeError("iFeature returned no encoding (None)")
+                raise RuntimeError("descriptor not recognized by this iFeatureOmegaCLI version")
+            n_feat = enc.shape[1]
+            min_expected = _MIN_FEATURES.get(desc, 1)
+            if n_feat < min_expected:
+                raise RuntimeError(
+                    f"got {n_feat} features, expected >= {min_expected} "
+                    f"(stale encoding from previous descriptor?)")
             df = enc.copy()
             df.columns = [f"{alias(desc)}::{c}" for c in df.columns]
             if write_per_descriptor:
