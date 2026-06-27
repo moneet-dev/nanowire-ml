@@ -122,6 +122,9 @@ def main() -> None:
     print("\n=== Combinations ===", flush=True)
     for name, groups in COMBO_CONFIGS.items():
         X_sub, n = select_columns(df, groups)
+        if n == 0:
+            print(f"  {name:20s} SKIPPED — no matching features in matrix", flush=True)
+            continue
         rows.append(evaluate_config(name, X_sub, y, n, get_xgb(variant), cv))
 
     # Top-100 SHAP features (if Phase 4 ran)
