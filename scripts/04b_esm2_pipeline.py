@@ -6,23 +6,25 @@ serves as the traditional-baseline comparison to Raya et al. 2025.
 
 Key contributions over 04b v1:
   1. 5-fold stratified CV — aligned with ablation study; more robust than 70/30 split
-  2. Layer-wise probing — identifies which transformer layer captures nanowire signal
-     (single forward pass extracts layers 6/12/18/24/30/33 simultaneously)
+  2. Full layer-wise probing (all 33 transformer layers) with bootstrap 95% CIs —
+     identifies which depth captures nanowire signal, with uncertainty quantification
+     (single forward pass extracts all layers simultaneously)
   3. UMAP visualization — confirms linear separability in ESM-2 embedding space
   4. Saves OOF predictions (esm2_cv_preds.csv) for McNemar's test in Phase 4c
   5. Supports nr and redundant variants via CLI arg
 
 ESM-2 model: esm2_t33_650M_UR50D (650 M params, 33 transformer layers, 1280-dim)
-Mean-pool over residue positions at layer 33; layer probing covers 6/12/18/24/30/33.
+Mean-pool over residue positions; layer probing covers every layer 1-33 with
+1000-sample bootstrap 95% CIs on ROC-AUC and PR-AUC per layer.
 
-Runtime estimate on T4: ~3 min embedding, ~4 min CV battery, ~1 min layer probing,
-~3 min UMAP = ~11 min total.
+Runtime estimate on T4: ~3 min embedding, ~4 min CV battery, ~6 min layer probing
+(33 layers x 5-fold CV x bootstrap CI), ~3 min UMAP = ~16 min total.
 
 Outputs:
   data/features/esm2_embeddings[_redundant].npy      — (N×1280) float32, gitignored
   data/features/esm2_layer_embs[_redundant].npz      — per-layer arrays, gitignored
   results/metrics/esm2_cv_table[_redundant].csv      — classifier battery (5-fold CV)
-  results/metrics/esm2_layer_table[_redundant].csv   — per-layer probing (LR)
+  results/metrics/esm2_layer_table[_redundant].csv   — per-layer probing (LR) w/ bootstrap 95% CIs
   results/metrics/esm2_cv_preds[_redundant].csv      — OOF predictions for McNemar test
   results/figures/esm2_umap[_redundant].png          — UMAP coloured by class
   results/figures/esm2_layer_probing[_redundant].png — ROC-AUC / ECE vs layer depth
@@ -60,7 +62,7 @@ FEAT = REPO / "data" / "features"
 MET  = REPO / "results" / "metrics"
 FIGS = REPO / "results" / "figures"
 
-PROBE_LAYERS = [6, 12, 18, 24, 30, 33]
+PROBE_LAYERS = list(range(1, 34))  # all 33 ESM-2 transformer layers
 CV           = StratifiedKFold(n_splits=5, shuffle=True, random_state=42)
 BATCH_SIZE   = 4   # sequences per ESM-2 forward pass; lower if OOM on smaller GPU
 MAX_LEN      = 1022  # ESM-2 token limit (excluding BOS/EOS)
@@ -236,8 +238,10 @@ def run_classifier_battery(
 def probe_layers(
     layer_arrays: dict[int, np.ndarray], y: np.ndarray
 ) -> list[dict]:
-    """Fit LR on mean-pooled embeddings from each layer. Identifies which layer
-    captures the most classification-relevant information."""
+    """Fit LR on mean-pooled embeddings from each of the 33 ESM-2 layers.
+    Identifies which layer captures the most classification-relevant information,
+    with bootstrap 95% CIs on ROC-AUC and PR-AUC so layer-to-layer differences can
+    be judged for statistical significance (overlapping CIs = not distinguishable)."""
     rows: list[dict] = []
     for L in PROBE_LAYERS:
         X_L = layer_arrays[L]
@@ -250,11 +254,22 @@ def probe_layers(
         roc = float(roc_auc_score(y, oof))
         pr  = float(average_precision_score(y, oof))
         ece = float(eu.compute_ece(y, oof))
+        roc_ci = eu.bootstrap_metric_ci(y, oof, "roc_auc")
+        pr_ci  = eu.bootstrap_metric_ci(y, oof, "pr_auc")
         dt  = time.time() - t0
-        rows.append({"layer": L, "roc_auc": round(roc, 4),
-                     "pr_auc": round(pr, 4), "ece": round(ece, 4)})
+        rows.append({
+            "layer": L,
+            "roc_auc": round(roc, 4),
+            "roc_auc_ci_low": round(roc_ci[1], 4),
+            "roc_auc_ci_high": round(roc_ci[2], 4),
+            "pr_auc": round(pr, 4),
+            "pr_auc_ci_low": round(pr_ci[1], 4),
+            "pr_auc_ci_high": round(pr_ci[2], 4),
+            "ece": round(ece, 4),
+        })
         print(
-            f"  layer {L:2d}  roc={roc:.4f}  pr={pr:.4f}  ece={ece:.4f}  [{dt:.0f}s]",
+            f"  layer {L:2d}  roc={roc:.4f} [{roc_ci[1]:.4f}, {roc_ci[2]:.4f}]  "
+            f"pr={pr:.4f}  ece={ece:.4f}  [{dt:.0f}s]",
             flush=True,
         )
     return rows
@@ -295,28 +310,34 @@ def plot_umap(X: np.ndarray, y: np.ndarray, out: Path) -> None:
 
 
 def plot_layer_probing(rows: list[dict], out: Path) -> None:
-    layers = [r["layer"]   for r in rows]
-    rocs   = [r["roc_auc"] for r in rows]
-    prs    = [r["pr_auc"]  for r in rows]
-    eces   = [r["ece"]     for r in rows]
+    layers   = [r["layer"]   for r in rows]
+    rocs     = [r["roc_auc"] for r in rows]
+    roc_lo   = [r["roc_auc_ci_low"]  for r in rows]
+    roc_hi   = [r["roc_auc_ci_high"] for r in rows]
+    prs      = [r["pr_auc"]  for r in rows]
+    pr_lo    = [r["pr_auc_ci_low"]  for r in rows]
+    pr_hi    = [r["pr_auc_ci_high"] for r in rows]
+    eces     = [r["ece"]     for r in rows]
 
-    fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(12, 5))
+    fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(14, 5.5))
 
-    ax1.plot(layers, rocs, "o-", color="#2196F3", lw=2, ms=7, label="ROC-AUC")
-    ax1.plot(layers, prs,  "s--", color="#4CAF50", lw=2, ms=7, label="PR-AUC")
+    ax1.plot(layers, rocs, "o-", color="#2196F3", lw=1.5, ms=4, label="ROC-AUC")
+    ax1.fill_between(layers, roc_lo, roc_hi, color="#2196F3", alpha=0.15)
+    ax1.plot(layers, prs, "s--", color="#4CAF50", lw=1.5, ms=4, label="PR-AUC")
+    ax1.fill_between(layers, pr_lo, pr_hi, color="#4CAF50", alpha=0.15)
     ax1.set_xlabel("ESM-2 Transformer Layer", fontsize=11)
-    ax1.set_ylabel("5-Fold CV Score", fontsize=11)
+    ax1.set_ylabel("5-Fold CV Score (with 95% bootstrap CI)", fontsize=11)
     ax1.set_title("Layer Probing — LR Classifier")
-    ax1.set_xticks(layers)
-    ax1.set_ylim(max(0.9, min(rocs + prs) - 0.01), 1.002)
+    ax1.set_xticks(range(0, 34, 2))
+    ax1.set_ylim(max(0.9, min(roc_lo + pr_lo) - 0.005), 1.002)
     ax1.legend(fontsize=10)
     ax1.grid(axis="y", alpha=0.3)
 
-    ax2.plot(layers, eces, "D-", color="#F44336", lw=2, ms=7, label="ECE")
+    ax2.plot(layers, eces, "D-", color="#F44336", lw=1.5, ms=4, label="ECE")
     ax2.set_xlabel("ESM-2 Transformer Layer", fontsize=11)
     ax2.set_ylabel("Expected Calibration Error (ECE)", fontsize=11)
     ax2.set_title("Layer Probing — Calibration (ECE ↓)")
-    ax2.set_xticks(layers)
+    ax2.set_xticks(range(0, 34, 2))
     ax2.legend(fontsize=10)
     ax2.grid(axis="y", alpha=0.3)
 
