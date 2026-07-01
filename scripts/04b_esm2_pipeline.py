@@ -441,8 +441,15 @@ def main() -> None:
     layer_df   = pd.DataFrame(layer_rows)
     layer_path_csv = MET / f"esm2_layer_table{suffix}.csv"
     layer_df.to_csv(str(layer_path_csv), index=False)
-    best_layer = layer_rows[int(np.argmax([r["roc_auc"] for r in layer_rows]))]["layer"]
-    print(f"Best layer by ROC-AUC: {best_layer}", flush=True)
+    # ROC-AUC saturates near 1.0 across most layers, so break ties by lowest ECE
+    # rather than reporting whichever layer happens to sort first.
+    best_layer_idx = max(
+        range(len(layer_rows)),
+        key=lambda i: (layer_rows[i]["roc_auc"], -layer_rows[i]["ece"]),
+    )
+    best_layer = layer_rows[best_layer_idx]["layer"]
+    best_layer_ece = layer_rows[best_layer_idx]["ece"]
+    print(f"Best layer (ROC-AUC, ECE tiebreak): {best_layer}  ECE={best_layer_ece:.4f}", flush=True)
 
     # ── 4. Figures ────────────────────────────────────────────────────────────
     print("\n=== Figures ===", flush=True)
@@ -455,7 +462,7 @@ def main() -> None:
     print(f"ESM-2 pipeline complete  (variant={variant})", flush=True)
     print(cv_df[["model", "roc_auc", "pr_auc", "ece"]].to_string(index=False), flush=True)
     print(f"\nBest ECE model: {best_name}  ECE={best_row['ece']:.4f}", flush=True)
-    print(f"Best ROC-AUC layer: {best_layer}", flush=True)
+    print(f"Best layer (ROC-AUC, ECE tiebreak): {best_layer}  ECE={best_layer_ece:.4f}", flush=True)
 
 
 if __name__ == "__main__":

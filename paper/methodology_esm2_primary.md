@@ -95,10 +95,14 @@ promoting ESM-2 to the **primary** feature set, with iFeature demoted to
    leaves stale data from the previous descriptor rather than raising an error
    (`_MIN_FEATURES` validation guard exists specifically to catch this).
 2. **ESM-2 produces better-calibrated predictions with a fraction of the
-   engineering surface.** Preliminary runs showed ESM-2 + Logistic Regression
-   achieving ECE ≈ 0.0004 vs. iFeature's best ECE ≈ 0.0031 — a ~7.75x
-   improvement in calibration, with 1,280 learned features vs. 18,510
-   hand-crafted ones.
+   engineering surface.** A verified run (2026-07-01, NR variant, 5-fold CV)
+   confirmed ESM-2 + Logistic Regression achieves ECE = 0.0002
+   (`results/metrics/esm2_cv_table.csv`), against iFeature's best ECE = 0.0042
+   for LR on the same variant (`results/metrics/reproduction_table_nr.csv`) —
+   roughly a 20x improvement in calibration, with 1,280 learned features vs.
+   18,510 hand-crafted ones. Both feature sets separate the classes almost
+   perfectly (ROC-AUC ≈ 1.0000 for both), so calibration — not discrimination
+   — is where the two approaches are actually distinguishable.
 3. **Literature supports this as a real trend, not an artifact of this
    dataset.** Recent protein-language-model benchmarking work reports the same
    pattern — ESM-2 embeddings paired with a simple classifier (often LR)
@@ -383,6 +387,20 @@ question this experiment exists to answer; (c) a full-resolution curve is
 what's typically shown in probing papers in this literature, and a paper
 reviewer would likely ask for the missing layers if only 6 points were shown.
 
+**Empirical confirmation (2026-07-01 run, NR variant):** the full sweep shows
+ROC-AUC saturating at 1.0000 by layer 3 and staying there through layer 33 —
+discriminability emerges almost immediately and does not improve further with
+depth. ECE, however, keeps improving with depth even after ROC-AUC saturates:
+0.0035 at layer 1 → 0.0015 at layer 3 → noisy in the 0.0005–0.0010 range
+through the middle layers → 0.0002 at layer 33 (the best calibration value in
+the entire study). This is the actual reportable finding from this experiment:
+**separability and calibration quality are not the same signal and saturate
+at different depths** — a 6-point coarse sweep would likely have missed the
+noisy-middle / clean-end pattern in the ECE curve. See
+`results/metrics/esm2_layer_table.csv` and
+`results/figures/esm2_layer_probing.png` for the full sweep once §7 is filled
+in from a complete run.
+
 ### 4.7 Why LR (not a non-linear model) as the standard classifier for the primary ESM-2 result
 
 While the classifier battery (§2.3.2) evaluates 5 model families on ESM-2
@@ -436,9 +454,15 @@ paper over a messy embedding.
 Use this section as a literal checklist. For each item, verify against the
 linked script and mark ✅ / ❌ / ⚠️ with a one-line note.
 
-- [ ] `04b_esm2_pipeline.py`: `PROBE_LAYERS` covers all 33 layers, not a subset
-- [ ] `04b_esm2_pipeline.py`: `probe_layers()` reports bootstrap CI columns
+- [x] `04b_esm2_pipeline.py`: `PROBE_LAYERS` covers all 33 layers, not a subset
+      — verified in the 2026-07-01 run (`esm2_layer_table.csv`, 33 rows)
+- [x] `04b_esm2_pipeline.py`: `probe_layers()` reports bootstrap CI columns
       (`roc_auc_ci_low/high`, `pr_auc_ci_low/high`) in the output CSV
+- [x] Best-layer selection breaks ties correctly — fixed 2026-07-01: with
+      ROC-AUC saturated at 1.0000 for layers 3-33, the original
+      `argmax(roc_auc)` picked layer 3 (first tie) rather than the
+      best-calibrated layer. Now sorts by `(roc_auc, -ece)` so ties are
+      broken by lowest ECE; layer 33 is correctly reported as best.
 - [ ] `04b_esm2_pipeline.py` and `04c_esm2_analysis.py` use the **same**
       `StratifiedKFold` parameters (`n_splits=5, shuffle=True, random_state=42`)
 - [ ] `04c_esm2_analysis.py`: iFeature rows are re-indexed to match ESM-2's
